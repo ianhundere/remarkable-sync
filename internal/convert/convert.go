@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,10 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gomarkdown/markdown/ast"
-	"github.com/gomarkdown/markdown/parser"
 	"github.com/jung-kurt/gofpdf"
 	"github.com/ledongthuc/pdf"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
 	"gopkg.in/yaml.v3"
 )
 
