@@ -26,6 +26,7 @@ var (
 	obsidianVault      string
 	restartXochitl     bool
 	quiet              bool
+	forceOverwrite     bool
 	purgeExceptPattern string
 
 	// pdf flags
@@ -50,12 +51,14 @@ func init() {
 	rootCmd.AddCommand(newFromRemarkableCmd())
 	rootCmd.AddCommand(newToRemarkableCmd())
 	rootCmd.AddCommand(newCleanupCmd())
+	rootCmd.AddCommand(newRemoveCmd())
 
 	// global flags
 	rootCmd.PersistentFlags().StringVar(&remarkableHost, "host", "remarkable", "reMarkable tablet hostname/IP")
 	rootCmd.PersistentFlags().StringVar(&remarkableDir, "remarkable-dir", "/home/root/.local/share/remarkable/xochitl", "reMarkable documents directory")
 	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress non-error output")
 	rootCmd.PersistentFlags().BoolVarP(&restartXochitl, "restart", "r", true, "Restart xochitl after transfer")
+	rootCmd.PersistentFlags().BoolVarP(&forceOverwrite, "force", "f", false, "Overwrite existing files without prompting")
 
 	// pdf flags
 	rootCmd.PersistentFlags().Float64Var(&pdfMargins, "pdf-margins", 20.0, "margins in mm")
@@ -346,6 +349,62 @@ func cleanupHandler(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func newRemoveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "remove [filename]",
+		Short: "Remove a single file from reMarkable",
+		Long:  `Remove a specific file from reMarkable tablet by its visible name.`,
+		Args:  cobra.ExactArgs(1),
+		RunE:  removeHandler,
+	}
+	return cmd
+}
+
+func removeHandler(cmd *cobra.Command, args []string) error {
+	fileName := args[0]
+
+	client, err := remarkable.NewClient(remarkableHost, remarkableDir)
+	if err != nil {
+		return fmt.Errorf("failed to connect to reMarkable: %w", err)
+	}
+	defer client.Close()
+
+	// Check if file exists first
+	exists, err := client.FileExists(fileName)
+	if err != nil {
+		return fmt.Errorf("failed to check if file exists: %w", err)
+	}
+
+	if !exists {
+		log("File '%s' not found on reMarkable", fileName)
+		return nil
+	}
+
+	// Stop xochitl before removal
+	if restartXochitl {
+		log("Stopping xochitl...")
+		if _, err := client.RunCommand("systemctl stop xochitl"); err != nil {
+			return fmt.Errorf("failed to stop xochitl: %w", err)
+		}
+	}
+
+	log("Removing file: %s", fileName)
+	if err := client.DeleteFileByName(fileName); err != nil {
+		return fmt.Errorf("failed to remove file: %w", err)
+	}
+
+	// Restart xochitl
+	if restartXochitl {
+		log("Restarting xochitl...")
+		if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
+			return fmt.Errorf("failed to restart xochitl: %w", err)
+		}
+	}
+
+	log("Successfully removed: %s", fileName)
+	return nil
+}
+
 // helper functions
 func isSupported(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
@@ -355,7 +414,7 @@ func isSupported(path string) bool {
 func uploadFile(client *remarkable.Client, path string) error {
 	log("Uploading: %s", path)
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	return client.UploadFile(path, name)
+	return client.UploadFile(path, name, forceOverwrite)
 }
 
 func convertAndUpload(client *remarkable.Client, converter *convert.Converter, mdPath string) error {
@@ -369,7 +428,7 @@ func convertAndUpload(client *remarkable.Client, converter *convert.Converter, m
 
 	// send to remarkable
 	name := strings.TrimSuffix(filepath.Base(mdPath), filepath.Ext(mdPath))
-	if err := client.UploadFile(pdfPath, name); err != nil {
+	if err := client.UploadFile(pdfPath, name, forceOverwrite); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 

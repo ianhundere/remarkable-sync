@@ -56,7 +56,51 @@ type Transform struct {
 	M33 int `json:"m33"`
 }
 
-func (c *Client) UploadFile(localPath string, visibleName string) error {
+// FileExists checks if a file with the given visibleName already exists on reMarkable
+// Excludes files in trash
+func (c *Client) FileExists(visibleName string) (bool, error) {
+	// search for the visible name in metadata files
+	cmd := fmt.Sprintf("grep -l \"%s\" %s/*.metadata 2>/dev/null", visibleName, c.Dir)
+	output, err := c.RunCommand(cmd)
+	if err != nil || strings.TrimSpace(output) == "" {
+		return false, nil
+	}
+
+	// Check each matching file to see if it's in trash
+	files := strings.Split(strings.TrimSpace(output), "\n")
+	for _, file := range files {
+		// Read the metadata to check if it's in trash
+		content, err := c.RunCommand(fmt.Sprintf("cat %s", file))
+		if err != nil {
+			continue
+		}
+
+		// Check if parent is not "trash"
+		if !strings.Contains(content, `"parent": "trash"`) {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (c *Client) UploadFile(localPath string, visibleName string, forceOverwrite bool) error {
+	// check if file already exists
+	exists, err := c.FileExists(visibleName)
+	if err != nil {
+		return fmt.Errorf("failed to check if file exists: %w", err)
+	}
+	if exists && !forceOverwrite {
+		return fmt.Errorf("file '%s' already exists on reMarkable (use --force to overwrite)", visibleName)
+	}
+
+	// If forcing overwrite, delete existing file first
+	if exists && forceOverwrite {
+		if err := c.DeleteFileByName(visibleName); err != nil {
+			return fmt.Errorf("failed to delete existing file: %w", err)
+		}
+	}
+
 	id := uuid.New().String()
 	fileType := PDF
 	if strings.HasSuffix(strings.ToLower(localPath), ".epub") {
@@ -189,6 +233,41 @@ func (c *Client) RemoveFile(uuid string) error {
 	if _, err := c.RunCommand(cmd); err != nil {
 		return fmt.Errorf("failed to remove file: %w", err)
 	}
+	return nil
+}
+
+// DeleteFileByName deletes all files (including those in trash) with the given visible name
+func (c *Client) DeleteFileByName(visibleName string) error {
+	// Get all metadata files first
+	allFiles, err := c.RunCommand(fmt.Sprintf("ls %s/*.metadata 2>/dev/null", c.Dir))
+	if err != nil || strings.TrimSpace(allFiles) == "" {
+		return nil // No files
+	}
+
+	// Check each file individually for exact name match (not grep pattern)
+	filePaths := strings.Split(strings.TrimSpace(allFiles), "\n")
+	for _, filePath := range filePaths {
+		// Read metadata
+		content, err := c.RunCommand(fmt.Sprintf("cat %s", filePath))
+		if err != nil {
+			continue
+		}
+
+		// Parse JSON to check visibleName - exact match only
+		var metadata Metadata
+		if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+			continue
+		}
+
+		// Only delete if exact match
+		if metadata.VisibleName == visibleName {
+			uuid := strings.TrimSuffix(filepath.Base(filePath), ".metadata")
+			if err := c.RemoveFile(uuid); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
