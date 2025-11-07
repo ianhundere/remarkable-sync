@@ -20,6 +20,12 @@ const (
 	EPUB FileType = "epub"
 )
 
+// file info for listing
+type FileInfo struct {
+	UUID string
+	Name string
+}
+
 // metadata json structure
 type Metadata struct {
 	LastModified string `json:"lastModified"`
@@ -108,7 +114,7 @@ func (c *Client) UploadFile(localPath string, visibleName string) error {
 	for _, f := range []struct {
 		src, dst string
 	}{
-		{localPath, filepath.Join(c.Dir, id+string(fileType))},
+		{localPath, filepath.Join(c.Dir, id+"."+string(fileType))},
 		{filepath.Join(tmpDir, id+".metadata"), filepath.Join(c.Dir, id+".metadata")},
 		{filepath.Join(tmpDir, id+".content"), filepath.Join(c.Dir, id+".content")},
 	} {
@@ -127,18 +133,18 @@ func (c *Client) UploadFile(localPath string, visibleName string) error {
 	return nil
 }
 
-func (c *Client) ListFiles() ([]string, error) {
+func (c *Client) ListFiles() ([]FileInfo, error) {
 	// get metadata files
 	output, err := c.RunCommand(fmt.Sprintf("ls %s/*.metadata", c.Dir))
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
 
-	var files []string
+	var files []FileInfo
 	for _, metadataPath := range strings.Split(strings.TrimSpace(output), "\n") {
 		// get uuid from filename
 		uuid := strings.TrimSuffix(filepath.Base(metadataPath), ".metadata")
-		
+
 		// check pdf exists
 		if _, err := c.RunCommand(fmt.Sprintf("test -f %s/%s.pdf", c.Dir, uuid)); err != nil {
 			continue
@@ -152,7 +158,10 @@ func (c *Client) ListFiles() ([]string, error) {
 
 		// get visible name
 		if matches := regexp.MustCompile(`"visibleName":\s*"([^"]+)"`).FindStringSubmatch(content); len(matches) > 1 {
-			files = append(files, matches[1])
+			files = append(files, FileInfo{
+				UUID: uuid,
+				Name: matches[1],
+			})
 		}
 	}
 
@@ -166,7 +175,8 @@ func (c *Client) DownloadFile(uuid, name string) (string, error) {
 	}
 
 	localPath := filepath.Join(tmpDir, name+".pdf")
-	if err := c.TransferFile(filepath.Join(c.Dir, uuid+".pdf"), localPath); err != nil {
+	remotePath := filepath.Join(c.Dir, uuid+".pdf")
+	if err := c.DownloadFromRemote(remotePath, localPath); err != nil {
 		os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("failed to download file: %w", err)
 	}
