@@ -117,11 +117,12 @@ func (c *Converter) processConfig(pdf *gofpdf.Fpdf, content []byte) error {
 
 // pdfRenderer renders goldmark AST to gofpdf
 type pdfRenderer struct {
-	pdf       *gofpdf.Fpdf
-	options   PDFOptions
-	source    []byte
-	listDepth int
-	fontStack []string // track font style (B, I, BI, "")
+	pdf          *gofpdf.Fpdf
+	options      PDFOptions
+	source       []byte
+	listDepth    int
+	fontStack    []string // track font style (B, I, BI, "")
+	baseLeftMargin float64   // original left margin
 }
 
 func (r *pdfRenderer) pushFont(style string) {
@@ -156,12 +157,12 @@ func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
 
 	case *ast.Heading:
 		if entering {
-			r.pdf.Ln(5)
+			r.pdf.Ln(6)  // Space before heading
 			size := r.options.FontSize + float64(6-n.Level)*2
 			r.pdf.SetFont(r.options.MainFont, "B", size)
 		} else {
 			r.pdf.SetFont(r.options.MainFont, "", r.options.FontSize)
-			r.pdf.Ln(3)
+			r.pdf.Ln(5)  // Space after heading
 		}
 
 	case *ast.Paragraph:
@@ -169,12 +170,20 @@ func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
 			r.pdf.Ln(4)
 		}
 
+	case *ast.TextBlock:
+		// TextBlock is used inside list items - don't add extra spacing
+		// Just let the child text nodes render
+
 	case *ast.List:
 		if entering {
 			r.listDepth++
 			r.pdf.Ln(2)
+			// Set left margin for this list level
+			r.pdf.SetLeftMargin(r.baseLeftMargin + float64(r.listDepth)*6)
 		} else {
 			r.listDepth--
+			// Restore previous margin
+			r.pdf.SetLeftMargin(r.baseLeftMargin + float64(r.listDepth)*6)
 			if r.listDepth == 0 {
 				r.pdf.Ln(2)
 			}
@@ -182,16 +191,19 @@ func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
 
 	case *ast.ListItem:
 		if entering {
-			indent := float64(r.listDepth-1) * 8
-			r.pdf.SetX(r.pdf.GetX() + indent)
+			// Move to start of line with proper indent
+			lMargin, _, _, _ := r.pdf.GetMargins()
+			r.pdf.SetX(lMargin)
+
+			// Write bullet/number - use simple ASCII bullet for compatibility
 			if n.Parent().(*ast.List).IsOrdered() {
-				// For ordered lists, goldmark doesn't track number, so use "1. "
-				r.pdf.Write(5, "  1. ")
+				r.pdf.Cell(5, 5, "1.")
 			} else {
-				r.pdf.Write(5, "  • ")
+				r.pdf.Cell(5, 5, "*")  // Use asterisk instead of Unicode bullet
 			}
+			r.pdf.Write(5, " ")
 		} else {
-			r.pdf.Ln(1)
+			r.pdf.Ln(5)
 		}
 
 	case *ast.Emphasis:
@@ -276,11 +288,15 @@ func (c *Converter) processMarkdown(pdf *gofpdf.Fpdf, content []byte) error {
 	reader := text.NewReader(content)
 	doc := md.Parser().Parse(reader)
 
+	// Get initial left margin
+	lMargin, _, _, _ := pdf.GetMargins()
+
 	renderer := &pdfRenderer{
-		pdf:       pdf,
-		options:   c.options,
-		source:    content,
-		fontStack: []string{},
+		pdf:            pdf,
+		options:        c.options,
+		source:         content,
+		fontStack:      []string{},
+		baseLeftMargin: lMargin,
 	}
 
 	err := ast.Walk(doc, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -301,10 +317,8 @@ func (c *Converter) MarkdownToPDF(mdPath string) (string, error) {
 
 	pdf := c.setupPDF()
 
-	// add title
-	pdf.SetFont(c.options.MainFont, "B", c.options.FontSize+4)
-	pdf.Cell(0, 10, title)
-	pdf.Ln(15)
+	// Don't add title separately - it's in the markdown as H1
+	// Just process the content
 
 	// process content based on file type
 	ext := strings.ToLower(filepath.Ext(mdPath))
