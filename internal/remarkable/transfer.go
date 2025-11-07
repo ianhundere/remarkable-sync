@@ -56,7 +56,27 @@ type Transform struct {
 	M33 int `json:"m33"`
 }
 
+// FileExists checks if a file with the given visibleName already exists on reMarkable
+func (c *Client) FileExists(visibleName string) (bool, error) {
+	// search for the visible name in metadata files
+	cmd := fmt.Sprintf("grep -l \"%s\" %s/*.metadata 2>/dev/null", visibleName, c.Dir)
+	output, err := c.RunCommand(cmd)
+	if err != nil || strings.TrimSpace(output) == "" {
+		return false, nil
+	}
+	return true, nil
+}
+
 func (c *Client) UploadFile(localPath string, visibleName string) error {
+	// check if file already exists
+	exists, err := c.FileExists(visibleName)
+	if err != nil {
+		return fmt.Errorf("failed to check if file exists: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("file '%s' already exists on reMarkable (skipping)", visibleName)
+	}
+
 	id := uuid.New().String()
 	fileType := PDF
 	if strings.HasSuffix(strings.ToLower(localPath), ".epub") {
