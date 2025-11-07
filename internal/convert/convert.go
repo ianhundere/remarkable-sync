@@ -1,7 +1,6 @@
 package convert
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -116,54 +115,179 @@ func (c *Converter) processConfig(pdf *gofpdf.Fpdf, content []byte) error {
 	return nil
 }
 
-func (c *Converter) processMarkdown(pdf *gofpdf.Fpdf, content []byte) error {
-	p := parser.NewWithExtensions(parser.CommonExtensions | parser.AutoHeadingIDs)
-	doc := p.Parse(content)
+// pdfRenderer renders goldmark AST to gofpdf
+type pdfRenderer struct {
+	pdf       *gofpdf.Fpdf
+	options   PDFOptions
+	source    []byte
+	listDepth int
+	fontStack []string // track font style (B, I, BI, "")
+}
 
-	var inCodeBlock bool
-	pdf.SetFont(c.options.MainFont, "", c.options.FontSize)
+func (r *pdfRenderer) pushFont(style string) {
+	r.fontStack = append(r.fontStack, style)
+	r.pdf.SetFont(r.options.MainFont, style, r.options.FontSize)
+}
 
-	ast.WalkFunc(doc, func(node ast.Node, entering bool) ast.WalkStatus {
+func (r *pdfRenderer) popFont() {
+	if len(r.fontStack) > 0 {
+		r.fontStack = r.fontStack[:len(r.fontStack)-1]
+	}
+	if len(r.fontStack) > 0 {
+		r.pdf.SetFont(r.options.MainFont, r.fontStack[len(r.fontStack)-1], r.options.FontSize)
+	} else {
+		r.pdf.SetFont(r.options.MainFont, "", r.options.FontSize)
+	}
+}
+
+func (r *pdfRenderer) currentFont() string {
+	if len(r.fontStack) > 0 {
+		return r.fontStack[len(r.fontStack)-1]
+	}
+	return ""
+}
+
+func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
+	switch n := node.(type) {
+	case *ast.Document:
+		if entering {
+			r.pdf.SetFont(r.options.MainFont, "", r.options.FontSize)
+		}
+
+	case *ast.Heading:
+		if entering {
+			r.pdf.Ln(5)
+			size := r.options.FontSize + float64(6-n.Level)*2
+			r.pdf.SetFont(r.options.MainFont, "B", size)
+		} else {
+			r.pdf.SetFont(r.options.MainFont, "", r.options.FontSize)
+			r.pdf.Ln(3)
+		}
+
+	case *ast.Paragraph:
 		if !entering {
-			return ast.GoToNext
+			r.pdf.Ln(4)
 		}
 
-		switch n := node.(type) {
-		case *ast.Heading:
-			pdf.SetFont(c.options.MainFont, "B", 16-float64(n.Level))
-			pdf.Ln(5)
-		case *ast.Text:
-			if inCodeBlock {
-				pdf.SetFont(c.options.MonoFont, "", c.options.FontSize)
+	case *ast.List:
+		if entering {
+			r.listDepth++
+			r.pdf.Ln(2)
+		} else {
+			r.listDepth--
+			if r.listDepth == 0 {
+				r.pdf.Ln(2)
 			}
-			pdf.MultiCell(0, 5, string(n.Literal), "", "", inCodeBlock && c.options.Highlight)
-			if inCodeBlock {
-				pdf.SetFont(c.options.MainFont, "", c.options.FontSize)
-			}
-		case *ast.CodeBlock:
-			inCodeBlock = true
-			pdf.SetFont(c.options.MonoFont, "", c.options.FontSize)
-			if c.options.Highlight {
-				pdf.SetFillColor(245, 245, 245)
-			}
-			pdf.MultiCell(0, 5, string(n.Literal), "", "", c.options.Highlight)
-			pdf.SetFont(c.options.MainFont, "", c.options.FontSize)
-			inCodeBlock = false
-		case *ast.Link:
-			if c.options.ColorLinks {
-				pdf.SetTextColor(0, 0, 255)
-			}
-		case *ast.Paragraph:
-			pdf.Ln(5)
-		case *ast.List:
-			pdf.Ln(3)
-		case *ast.ListItem:
-			pdf.Write(5, "• ")
 		}
-		return ast.GoToNext
+
+	case *ast.ListItem:
+		if entering {
+			indent := float64(r.listDepth-1) * 8
+			r.pdf.SetX(r.pdf.GetX() + indent)
+			if n.Parent().(*ast.List).IsOrdered() {
+				// For ordered lists, goldmark doesn't track number, so use "1. "
+				r.pdf.Write(5, "  1. ")
+			} else {
+				r.pdf.Write(5, "  • ")
+			}
+		} else {
+			r.pdf.Ln(1)
+		}
+
+	case *ast.Emphasis:
+		if entering {
+			// Level 1 = italic (*text*), Level 2 = bold (**text**)
+			if n.Level == 2 {
+				r.pushFont("B")
+			} else {
+				r.pushFont("I")
+			}
+		} else {
+			r.popFont()
+		}
+
+	case *ast.CodeSpan:
+		if entering {
+			r.pdf.SetFont(r.options.MonoFont, "", r.options.FontSize-1)
+			if r.options.Highlight {
+				r.pdf.SetFillColor(240, 240, 240)
+			}
+			code := string(n.Text(r.source))
+			r.pdf.Write(5, code)
+			r.pdf.SetFont(r.options.MainFont, r.currentFont(), r.options.FontSize)
+			return ast.WalkSkipChildren
+		}
+
+	case *ast.FencedCodeBlock:
+		if entering {
+			r.pdf.Ln(3)
+			r.pdf.SetFont(r.options.MonoFont, "", r.options.FontSize-1)
+			if r.options.Highlight {
+				r.pdf.SetFillColor(245, 245, 245)
+			}
+
+			lines := n.Lines()
+			for i := 0; i < lines.Len(); i++ {
+				line := lines.At(i)
+				r.pdf.MultiCell(0, 5, string(line.Value(r.source)), "", "", r.options.Highlight)
+			}
+
+			r.pdf.SetFont(r.options.MainFont, r.currentFont(), r.options.FontSize)
+			r.pdf.SetFillColor(255, 255, 255)
+			r.pdf.Ln(3)
+			return ast.WalkSkipChildren
+		}
+
+	case *ast.Link:
+		if entering {
+			if r.options.ColorLinks {
+				r.pdf.SetTextColor(0, 0, 255)
+			}
+		} else {
+			r.pdf.SetTextColor(0, 0, 0)
+		}
+
+	case *ast.Text:
+		if entering {
+			txt := string(n.Segment.Value(r.source))
+
+			// Handle soft line breaks
+			if n.SoftLineBreak() {
+				txt += " "
+			}
+
+			r.pdf.Write(5, txt)
+		}
+
+	case *ast.String:
+		if entering {
+			r.pdf.Write(5, string(n.Value))
+		}
+	}
+
+	return ast.WalkContinue
+}
+
+func (c *Converter) processMarkdown(pdf *gofpdf.Fpdf, content []byte) error {
+	md := goldmark.New(
+		goldmark.WithExtensions(),
+	)
+
+	reader := text.NewReader(content)
+	doc := md.Parser().Parse(reader)
+
+	renderer := &pdfRenderer{
+		pdf:       pdf,
+		options:   c.options,
+		source:    content,
+		fontStack: []string{},
+	}
+
+	err := ast.Walk(doc, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		return renderer.render(node, entering), nil
 	})
 
-	return nil
+	return err
 }
 
 func (c *Converter) MarkdownToPDF(mdPath string) (string, error) {
