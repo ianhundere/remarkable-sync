@@ -211,29 +211,29 @@ func fromRemarkableHandler(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, file := range files {
-		log("Processing: %s", file)
+		log("Processing: %s", file.Name)
 
 		// skip if file already exists
-		mdPath := filepath.Join(inboxDir, file+".md")
+		mdPath := filepath.Join(inboxDir, file.Name+".md")
 		if _, err := os.Stat(mdPath); err == nil {
-			log("Skipping %s (already exists)", file)
+			log("Skipping %s (already exists)", file.Name)
 			continue
 		}
 
 		// download pdf
-		pdfPath, err := client.DownloadFile(file, file)
+		pdfPath, err := client.DownloadFile(file.UUID, file.Name)
 		if err != nil {
-			log("Warning: failed to download %s: %v", file, err)
+			log("Warning: failed to download %s: %v", file.Name, err)
 			continue
 		}
 
 		// convert to markdown
 		if _, err := converter.PDFToMarkdown(pdfPath, inboxDir); err != nil {
-			log("Warning: failed to convert %s: %v", file, err)
+			log("Warning: failed to convert %s: %v", file.Name, err)
 			continue
 		}
 
-		log("Successfully converted: %s", file)
+		log("Successfully converted: %s", file.Name)
 	}
 
 	return nil
