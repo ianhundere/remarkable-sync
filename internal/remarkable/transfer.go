@@ -32,15 +32,16 @@ type Metadata struct {
 	Type         string `json:"type"`
 	Version      int    `json:"version"`
 	VisibleName  string `json:"visibleName"`
+	Parent       string `json:"parent,omitempty"`
 }
 
 // content json structure
 type Content struct {
-	FileType   string     `json:"fileType"`
-	Transform  *Transform `json:"transform,omitempty"`
-	PageCount  int       `json:"pageCount,omitempty"`
-	Margins    int       `json:"margins,omitempty"`
-	TextScale  int       `json:"textScale,omitempty"`
+	FileType  string     `json:"fileType"`
+	Transform *Transform `json:"transform,omitempty"`
+	PageCount int        `json:"pageCount,omitempty"`
+	Margins   int        `json:"margins,omitempty"`
+	TextScale int        `json:"textScale,omitempty"`
 }
 
 // pdf transform matrix
@@ -57,7 +58,7 @@ type Transform struct {
 }
 
 // FileExists checks if a file with the given visibleName already exists on reMarkable
-// Excludes files in trash
+// excludes files in trash
 func (c *Client) FileExists(visibleName string) (bool, error) {
 	// search for the visible name in metadata files
 	cmd := fmt.Sprintf("grep -l \"%s\" %s/*.metadata 2>/dev/null", visibleName, c.Dir)
@@ -66,17 +67,27 @@ func (c *Client) FileExists(visibleName string) (bool, error) {
 		return false, nil
 	}
 
-	// Check each matching file to see if it's in trash
+	// checks each matching file to see if it's in trash
 	files := strings.Split(strings.TrimSpace(output), "\n")
 	for _, file := range files {
-		// Read the metadata to check if it's in trash
+		// reads the metadata to check if it's in trash
 		content, err := c.RunCommand(fmt.Sprintf("cat %s", file))
 		if err != nil {
 			continue
 		}
 
-		// Check if parent is not "trash"
-		if !strings.Contains(content, `"parent": "trash"`) {
+		// parses metadata to properly check parent field
+		var metadata Metadata
+		if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+			// fallback to string check if JSON parse fails
+			if !strings.Contains(content, `"parent": "trash"`) {
+				return true, nil
+			}
+			continue
+		}
+
+		// checks if parent is not "trash"
+		if metadata.Parent != "trash" {
 			return true, nil
 		}
 	}
@@ -84,7 +95,7 @@ func (c *Client) FileExists(visibleName string) (bool, error) {
 	return false, nil
 }
 
-func (c *Client) UploadFile(localPath string, visibleName string, forceOverwrite bool) error {
+func (c *Client) UploadFile(localPath string, visibleName string, forceOverwrite bool, parentUUID ...string) error {
 	// check if file already exists
 	exists, err := c.FileExists(visibleName)
 	if err != nil {
@@ -94,7 +105,7 @@ func (c *Client) UploadFile(localPath string, visibleName string, forceOverwrite
 		return fmt.Errorf("file '%s' already exists on reMarkable (use --force to overwrite)", visibleName)
 	}
 
-	// If forcing overwrite, delete existing file first
+	// if forcing overwrite, delete existing file first
 	if exists && forceOverwrite {
 		if err := c.DeleteFileByName(visibleName); err != nil {
 			return fmt.Errorf("failed to delete existing file: %w", err)
@@ -112,6 +123,11 @@ func (c *Client) UploadFile(localPath string, visibleName string, forceOverwrite
 		Type:         "DocumentType",
 		Version:      1,
 		VisibleName:  visibleName,
+	}
+
+	// sets parent folder if provided
+	if len(parentUUID) > 0 && parentUUID[0] != "" {
+		metadata.Parent = parentUUID[0]
 	}
 
 	content := Content{
@@ -201,12 +217,22 @@ func (c *Client) ListFiles() ([]FileInfo, error) {
 		}
 
 		// get visible name
-		if matches := regexp.MustCompile(`"visibleName":\s*"([^"]+)"`).FindStringSubmatch(content); len(matches) > 1 {
-			files = append(files, FileInfo{
-				UUID: uuid,
-				Name: matches[1],
-			})
+		var metadata Metadata
+		if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+			// fallback to regex if json parse fails
+			if matches := regexp.MustCompile(`"visibleName":\s*"([^"]+)"`).FindStringSubmatch(content); len(matches) > 1 {
+				files = append(files, FileInfo{
+					UUID: uuid,
+					Name: matches[1],
+				})
+			}
+			continue
 		}
+
+		files = append(files, FileInfo{
+			UUID: uuid,
+			Name: metadata.VisibleName,
+		})
 	}
 
 	return files, nil
@@ -238,28 +264,28 @@ func (c *Client) RemoveFile(uuid string) error {
 
 // DeleteFileByName deletes all files (including those in trash) with the given visible name
 func (c *Client) DeleteFileByName(visibleName string) error {
-	// Get all metadata files first
+	// get all metadata files first
 	allFiles, err := c.RunCommand(fmt.Sprintf("ls %s/*.metadata 2>/dev/null", c.Dir))
 	if err != nil || strings.TrimSpace(allFiles) == "" {
 		return nil // No files
 	}
 
-	// Check each file individually for exact name match (not grep pattern)
+	// checks each file individually for exact name match (not grep pattern)
 	filePaths := strings.Split(strings.TrimSpace(allFiles), "\n")
 	for _, filePath := range filePaths {
-		// Read metadata
+		// reads metadata
 		content, err := c.RunCommand(fmt.Sprintf("cat %s", filePath))
 		if err != nil {
 			continue
 		}
 
-		// Parse JSON to check visibleName - exact match only
+		// parses json to check visibleName / exact match only
 		var metadata Metadata
 		if err := json.Unmarshal([]byte(content), &metadata); err != nil {
 			continue
 		}
 
-		// Only delete if exact match
+		// only delete if exact match
 		if metadata.VisibleName == visibleName {
 			uuid := strings.TrimSuffix(filepath.Base(filePath), ".metadata")
 			if err := c.RemoveFile(uuid); err != nil {
@@ -299,4 +325,116 @@ func (c *Client) CleanupExcept(pattern string) error {
 	}
 
 	return nil
+}
+
+// FindFolderUUID finds the UUID of a folder by its visible name
+// Returns empty string if folder doesn't exist
+func (c *Client) FindFolderUUID(folderName string) (string, error) {
+	// search for metadata files with CollectionType
+	cmd := fmt.Sprintf("grep -l '\"type\":.*\"CollectionType\"' %s/*.metadata 2>/dev/null", c.Dir)
+	output, _ := c.RunCommand(cmd)
+
+	// if grep finds nothing / returns exit code 1, which RunCommand treats as error
+	// means no folders exist
+	if strings.TrimSpace(output) == "" {
+		return "", nil
+	}
+
+	// check each matching file for the folder name
+	filePaths := strings.Split(strings.TrimSpace(output), "\n")
+
+	for _, filePath := range filePaths {
+		if filePath == "" {
+			continue
+		}
+
+		content, err := c.RunCommand(fmt.Sprintf("cat %s", filePath))
+		if err != nil {
+			continue
+		}
+
+		var metadata Metadata
+		if err := json.Unmarshal([]byte(content), &metadata); err != nil {
+			continue
+		}
+
+		// checks if it's a collection with matching name
+		if metadata.VisibleName == folderName && metadata.Parent != "trash" {
+			return strings.TrimSuffix(filepath.Base(filePath), ".metadata"), nil
+		}
+	}
+
+	return "", nil
+}
+
+// CreateFolder creates a new folder on reMarkable and returns its UUID
+func (c *Client) CreateFolder(folderName string) (string, error) {
+	folderID := uuid.New().String()
+
+	metadata := Metadata{
+		LastModified: fmt.Sprintf("%d000", time.Now().Unix()),
+		Type:         "CollectionType",
+		Version:      1,
+		VisibleName:  folderName,
+		Parent:       "",
+	}
+
+	// creates empty content file for folder
+	content := Content{}
+
+	// temp dir for metadata
+	tmpDir, err := os.MkdirTemp("", "remarkable-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// write metadata
+	metadataBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, folderID+".metadata"), metadataBytes, 0644); err != nil {
+		return "", fmt.Errorf("failed to write metadata: %w", err)
+	}
+
+	// write content
+	contentBytes, err := json.Marshal(content)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal content: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, folderID+".content"), contentBytes, 0644); err != nil {
+		return "", fmt.Errorf("failed to write content: %w", err)
+	}
+
+	// transfer files
+	for _, f := range []struct {
+		src, dst string
+	}{
+		{filepath.Join(tmpDir, folderID+".metadata"), filepath.Join(c.Dir, folderID+".metadata")},
+		{filepath.Join(tmpDir, folderID+".content"), filepath.Join(c.Dir, folderID+".content")},
+	} {
+		if err := c.TransferFile(f.src, f.dst); err != nil {
+			return "", fmt.Errorf("failed to transfer %s: %w", filepath.Base(f.src), err)
+		}
+	}
+
+	return folderID, nil
+}
+
+// EnsureFolder ensures a folder exists, creating it if necessary
+// Returns the folder's UUID
+func (c *Client) EnsureFolder(folderName string) (string, error) {
+	// checks if folder already exists
+	folderUUID, err := c.FindFolderUUID(folderName)
+	if err != nil {
+		return "", fmt.Errorf("failed to find folder: %w", err)
+	}
+
+	if folderUUID != "" {
+		return folderUUID, nil
+	}
+
+	// creates folder
+	return c.CreateFolder(folderName)
 }
