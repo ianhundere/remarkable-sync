@@ -297,34 +297,61 @@ func (c *Client) DeleteFileByName(visibleName string) error {
 	return nil
 }
 
-func (c *Client) CleanupExcept(pattern string) error {
+// CleanupResult contains information about cleanup operations
+type CleanupResult struct {
+	PreservedFiles []FileInfo
+	DeletedFiles   []FileInfo
+}
+
+func (c *Client) CleanupExcept(pattern string, dryRun bool) (*CleanupResult, error) {
 	// list metadata files and find ones to preserve
 	output, err := c.RunCommand(fmt.Sprintf("ls %s/*.metadata", c.Dir))
 	if err != nil {
-		return fmt.Errorf("failed to list files: %w", err)
+		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
 
-	// track uuids to preserve
-	preserveUUIDs := make(map[string]bool)
+	result := &CleanupResult{
+		PreservedFiles: []FileInfo{},
+		DeletedFiles:   []FileInfo{},
+	}
+
 	for _, metadataPath := range strings.Split(strings.TrimSpace(output), "\n") {
 		content, err := c.RunCommand(fmt.Sprintf("cat %s", metadataPath))
 		if err != nil {
 			continue
 		}
 
-		if matched, _ := regexp.MatchString(pattern, content); matched {
-			uuid := strings.TrimSuffix(filepath.Base(metadataPath), ".metadata")
-			preserveUUIDs[uuid] = true
+		uuid := strings.TrimSuffix(filepath.Base(metadataPath), ".metadata")
+
+		// parse metadata to get visible name
+		var metadata Metadata
+		var visibleName string
+		if err := json.Unmarshal([]byte(content), &metadata); err == nil {
+			visibleName = metadata.VisibleName
 		} else {
-			// remove unpreserved files immediately
-			uuid := strings.TrimSuffix(filepath.Base(metadataPath), ".metadata")
-			if err := c.RemoveFile(uuid); err != nil {
-				return fmt.Errorf("failed to remove %s: %w", uuid, err)
+			// fallback to uuid if can't parse
+			visibleName = uuid
+		}
+
+		fileInfo := FileInfo{
+			UUID: uuid,
+			Name: visibleName,
+		}
+
+		if matched, _ := regexp.MatchString(pattern, content); matched {
+			result.PreservedFiles = append(result.PreservedFiles, fileInfo)
+		} else {
+			result.DeletedFiles = append(result.DeletedFiles, fileInfo)
+			// only delete if not dry run
+			if !dryRun {
+				if err := c.RemoveFile(uuid); err != nil {
+					return result, fmt.Errorf("failed to remove %s: %w", visibleName, err)
+				}
 			}
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
 // FindFolderUUID finds the UUID of a folder by its visible name

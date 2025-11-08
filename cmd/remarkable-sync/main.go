@@ -29,6 +29,7 @@ var (
 	forceOverwrite     bool
 	purgeExceptPattern string
 	folderName         string
+	dryRun             bool
 
 	// pdf flags
 	pdfMargins    float64
@@ -54,27 +55,12 @@ func init() {
 	rootCmd.AddCommand(newCleanupCmd())
 	rootCmd.AddCommand(newRemoveCmd())
 
-	// global flags
+	// global flags - used across multiple commands
 	rootCmd.PersistentFlags().StringVar(&remarkableHost, "host", "remarkable", "reMarkable tablet hostname/IP")
 	rootCmd.PersistentFlags().StringVar(&remarkableDir, "remarkable-dir", "/home/root/.local/share/remarkable/xochitl", "reMarkable documents directory")
 	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress non-error output")
 	rootCmd.PersistentFlags().BoolVarP(&restartXochitl, "restart", "r", true, "Restart xochitl after transfer")
 	rootCmd.PersistentFlags().BoolVarP(&forceOverwrite, "force", "f", false, "Overwrite existing files without prompting")
-
-	// pdf flags
-	rootCmd.PersistentFlags().Float64Var(&pdfMargins, "pdf-margins", 20.0, "margins in mm")
-	rootCmd.PersistentFlags().Float64Var(&pdfFontSize, "pdf-fontsize", 11.0, "base font size")
-	rootCmd.PersistentFlags().StringVar(&pdfMainFont, "pdf-font", "Arial", "main font")
-	rootCmd.PersistentFlags().StringVar(&pdfMonoFont, "pdf-monofont", "Courier", "monospace font")
-	rootCmd.PersistentFlags().StringVar(&pdfPageSize, "pdf-pagesize", "A4", "page size")
-	rootCmd.PersistentFlags().BoolVar(&pdfColorLinks, "pdf-colorlinks", true, "use colored links")
-	rootCmd.PersistentFlags().BoolVar(&pdfTOC, "pdf-toc", true, "include table of contents")
-	rootCmd.PersistentFlags().BoolVar(&pdfHighlight, "pdf-highlight", true, "highlight code blocks")
-
-	// markdown flags
-	rootCmd.PersistentFlags().IntVar(&mdHeaderAdjust, "md-header-adjust", 1, "adjust header levels")
-	rootCmd.PersistentFlags().BoolVar(&mdFrontmatter, "md-frontmatter", true, "add yaml frontmatter")
-	rootCmd.PersistentFlags().BoolVar(&mdCleanupText, "md-cleanup", true, "clean up extracted text")
 }
 
 func getPDFOptions() convert.PDFOptions {
@@ -141,17 +127,18 @@ func processFiles(path string, process func(string) error) error {
 }
 
 func toRemarkableHandler(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("at least one file or directory path is required")
+	}
+
 	client, err := remarkable.NewClient(remarkableHost, remarkableDir)
 	if err != nil {
 		return fmt.Errorf("failed to connect to remarkable: %w", err)
 	}
 	defer client.Close()
 
-	if restartXochitl {
-		log("stopping xochitl...")
-		if _, err := client.RunCommand("systemctl stop xochitl"); err != nil {
-			return fmt.Errorf("failed to stop xochitl: %w", err)
-		}
+	if err := stopXochitl(client); err != nil {
+		return err
 	}
 
 	// handles folder creation if --folder flag is provided
@@ -179,14 +166,7 @@ func toRemarkableHandler(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if restartXochitl {
-		log("restarting xochitl...")
-		if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
-			return fmt.Errorf("failed to restart xochitl: %w", err)
-		}
-	}
-
-	return nil
+	return restartXochitlService(client)
 }
 
 func newFromRemarkableCmd() *cobra.Command {
@@ -196,6 +176,15 @@ func newFromRemarkableCmd() *cobra.Command {
 		Long:  `Download PDFs from reMarkable tablet and convert them to markdown in Obsidian vault.`,
 		RunE:  fromRemarkableHandler,
 	}
+
+	// vault path
+	cmd.Flags().StringVar(&obsidianVault, "vault", os.ExpandEnv("$HOME/notes"), "Path to Obsidian vault")
+
+	// markdown conversion options
+	cmd.Flags().IntVar(&mdHeaderAdjust, "md-header-adjust", 1, "adjust header levels")
+	cmd.Flags().BoolVar(&mdFrontmatter, "md-frontmatter", true, "add yaml frontmatter")
+	cmd.Flags().BoolVar(&mdCleanupText, "md-cleanup", true, "clean up extracted text")
+
 	return cmd
 }
 
@@ -264,6 +253,18 @@ func newObsidianCmd() *cobra.Command {
 		RunE:  obsidianHandler,
 	}
 	cmd.Flags().StringVar(&obsidianVault, "vault", os.ExpandEnv("$HOME/notes"), "Path to Obsidian vault")
+	cmd.Flags().StringVar(&folderName, "folder", "", "Upload files to this folder (creates if doesn't exist)")
+
+	// pdf conversion options
+	cmd.Flags().Float64Var(&pdfMargins, "pdf-margins", 20.0, "margins in mm")
+	cmd.Flags().Float64Var(&pdfFontSize, "pdf-fontsize", 11.0, "base font size")
+	cmd.Flags().StringVar(&pdfMainFont, "pdf-font", "Arial", "main font")
+	cmd.Flags().StringVar(&pdfMonoFont, "pdf-monofont", "Courier", "monospace font")
+	cmd.Flags().StringVar(&pdfPageSize, "pdf-pagesize", "A4", "page size")
+	cmd.Flags().BoolVar(&pdfColorLinks, "pdf-colorlinks", true, "use colored links")
+	cmd.Flags().BoolVar(&pdfTOC, "pdf-toc", true, "include table of contents")
+	cmd.Flags().BoolVar(&pdfHighlight, "pdf-highlight", true, "highlight code blocks")
+
 	return cmd
 }
 
@@ -282,11 +283,19 @@ func obsidianHandler(cmd *cobra.Command, args []string) error {
 
 	converter.SetOptions(getPDFOptions())
 
-	if restartXochitl {
-		log("stopping xochitl...")
-		if _, err := client.RunCommand("systemctl stop xochitl"); err != nil {
-			return fmt.Errorf("failed to stop xochitl: %w", err)
+	if err := stopXochitl(client); err != nil {
+		return err
+	}
+
+	// handles folder creation if --folder flag is provided
+	var parentUUID string
+	if folderName != "" {
+		log("Ensuring folder '%s' exists...", folderName)
+		parentUUID, err = client.EnsureFolder(folderName)
+		if err != nil {
+			return fmt.Errorf("failed to ensure folder: %w", err)
 		}
+		log("Using folder UUID: %s", parentUUID)
 	}
 
 	// process provided paths or entire vault
@@ -300,21 +309,14 @@ func obsidianHandler(cmd *cobra.Command, args []string) error {
 			if !strings.HasSuffix(filePath, ".md") {
 				return nil
 			}
-			return convertAndUpload(client, converter, filePath)
+			return convertAndUpload(client, converter, filePath, parentUUID)
 		})
 		if err != nil {
 			log("warning: %v", err)
 		}
 	}
 
-	if restartXochitl {
-		log("restarting xochitl...")
-		if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
-			return fmt.Errorf("failed to restart xochitl: %w", err)
-		}
-	}
-
-	return nil
+	return restartXochitlService(client)
 }
 
 func newCleanupCmd() *cobra.Command {
@@ -325,6 +327,7 @@ func newCleanupCmd() *cobra.Command {
 		RunE:  cleanupHandler,
 	}
 	cmd.Flags().StringVar(&purgeExceptPattern, "except", "", "Pattern to preserve (e.g. 'Quick sheets|Notebook tutorial')")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview what would be deleted without actually deleting")
 	return cmd
 }
 
@@ -339,27 +342,68 @@ func cleanupHandler(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// stop xochitl before cleanup
-	if restartXochitl {
-		log("Stopping xochitl...")
-		if _, err := client.RunCommand("systemctl stop xochitl"); err != nil {
-			return fmt.Errorf("failed to stop xochitl: %w", err)
+	// first run a dry-run to preview changes
+	log("Analyzing files on reMarkable...")
+	result, err := client.CleanupExcept(purgeExceptPattern, true)
+	if err != nil {
+		return fmt.Errorf("failed to analyze files: %w", err)
+	}
+
+	// display preview
+	log("\n=== CLEANUP PREVIEW ===")
+	log("\nFiles to PRESERVE (%d):", len(result.PreservedFiles))
+	if len(result.PreservedFiles) == 0 {
+		log("  (none)")
+	} else {
+		for _, file := range result.PreservedFiles {
+			log("  ✓ %s", file.Name)
 		}
 	}
 
-	log("Cleaning up files except those matching: %s", purgeExceptPattern)
-	if err := client.CleanupExcept(purgeExceptPattern); err != nil {
+	log("\nFiles to DELETE (%d):", len(result.DeletedFiles))
+	if len(result.DeletedFiles) == 0 {
+		log("  (none)")
+		log("\nNo files to delete. Exiting.")
+		return nil
+	}
+	for _, file := range result.DeletedFiles {
+		log("  ✗ %s", file.Name)
+	}
+	log("")
+
+	// if dry-run mode, stop here
+	if dryRun {
+		log("DRY RUN: No files were actually deleted.")
+		return nil
+	}
+
+	// confirmation prompt unless forced
+	if !forceOverwrite {
+		fmt.Printf("\nAre you sure you want to delete %d file(s)? [y/N]: ", len(result.DeletedFiles))
+		var response string
+		fmt.Scanln(&response)
+		response = strings.ToLower(strings.TrimSpace(response))
+		if response != "y" && response != "yes" {
+			log("Cleanup cancelled.")
+			return nil
+		}
+	}
+
+	if err := stopXochitl(client); err != nil {
+		return err
+	}
+
+	log("Deleting files...")
+	result, err = client.CleanupExcept(purgeExceptPattern, false)
+	if err != nil {
 		return fmt.Errorf("cleanup failed: %w", err)
 	}
 
-	// restarts xochitl if needed
-	if restartXochitl {
-		log("Restarting xochitl...")
-		if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
-			return fmt.Errorf("failed to restart xochitl: %w", err)
-		}
+	if err := restartXochitlService(client); err != nil {
+		return err
 	}
 
+	log("\n✓ Successfully deleted %d file(s) and preserved %d file(s)", len(result.DeletedFiles), len(result.PreservedFiles))
 	return nil
 }
 
@@ -394,12 +438,8 @@ func removeHandler(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// stops xochitl before removal
-	if restartXochitl {
-		log("Stopping xochitl...")
-		if _, err := client.RunCommand("systemctl stop xochitl"); err != nil {
-			return fmt.Errorf("failed to stop xochitl: %w", err)
-		}
+	if err := stopXochitl(client); err != nil {
+		return err
 	}
 
 	log("Removing file: %s", fileName)
@@ -407,12 +447,8 @@ func removeHandler(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to remove file: %w", err)
 	}
 
-	// restarts xochitl
-	if restartXochitl {
-		log("Restarting xochitl...")
-		if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
-			return fmt.Errorf("failed to restart xochitl: %w", err)
-		}
+	if err := restartXochitlService(client); err != nil {
+		return err
 	}
 
 	log("Successfully removed: %s", fileName)
@@ -420,6 +456,28 @@ func removeHandler(cmd *cobra.Command, args []string) error {
 }
 
 // helper functions
+func stopXochitl(client *remarkable.Client) error {
+	if !restartXochitl {
+		return nil
+	}
+	log("Stopping xochitl...")
+	if _, err := client.RunCommand("systemctl stop xochitl"); err != nil {
+		return fmt.Errorf("failed to stop xochitl: %w", err)
+	}
+	return nil
+}
+
+func restartXochitlService(client *remarkable.Client) error {
+	if !restartXochitl {
+		return nil
+	}
+	log("Restarting xochitl...")
+	if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
+		return fmt.Errorf("failed to restart xochitl: %w", err)
+	}
+	return nil
+}
+
 func isSupported(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	return ext == ".pdf" || ext == ".epub"
@@ -434,7 +492,7 @@ func uploadFile(client *remarkable.Client, path string, parentUUID string) error
 	return client.UploadFile(path, name, forceOverwrite)
 }
 
-func convertAndUpload(client *remarkable.Client, converter *convert.Converter, mdPath string) error {
+func convertAndUpload(client *remarkable.Client, converter *convert.Converter, mdPath string, parentUUID string) error {
 	log("Converting and uploading: %s", mdPath)
 
 	// convert to pdf
@@ -445,9 +503,8 @@ func convertAndUpload(client *remarkable.Client, converter *convert.Converter, m
 
 	// send to remarkable
 	name := strings.TrimSuffix(filepath.Base(mdPath), filepath.Ext(mdPath))
-	if err := client.UploadFile(pdfPath, name, forceOverwrite); err != nil {
-		return fmt.Errorf("upload failed: %w", err)
+	if parentUUID != "" {
+		return client.UploadFile(pdfPath, name, forceOverwrite, parentUUID)
 	}
-
-	return nil
+	return client.UploadFile(pdfPath, name, forceOverwrite)
 }
