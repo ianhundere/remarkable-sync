@@ -28,6 +28,7 @@ var (
 	quiet              bool
 	forceOverwrite     bool
 	purgeExceptPattern string
+	folderName         string
 
 	// pdf flags
 	pdfMargins    float64
@@ -117,6 +118,7 @@ func newToRemarkableCmd() *cobra.Command {
 		Long:  `Transfer PDF and EPUB files to reMarkable tablet. If no arguments provided, transfers from Obsidian vault.`,
 		RunE:  toRemarkableHandler,
 	}
+	cmd.Flags().StringVar(&folderName, "folder", "", "Upload files to this folder (creates if doesn't exist)")
 	return cmd
 }
 
@@ -152,13 +154,25 @@ func toRemarkableHandler(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// handles folder creation if --folder flag is provided
+	var parentUUID string
+	if folderName != "" {
+		log("Ensuring folder '%s' exists...", folderName)
+		parentUUID, err = client.EnsureFolder(folderName)
+		if err != nil {
+			return fmt.Errorf("failed to ensure folder: %w", err)
+		}
+		log("Using folder UUID: %s", parentUUID)
+	}
+
 	// process each path
 	for _, path := range args {
 		err := processFiles(path, func(filePath string) error {
 			if !isSupported(filePath) {
-				return fmt.Errorf("unsupported file type: %s", filePath)
+				// skips unsupported files silently
+				return nil
 			}
-			return uploadFile(client, filePath)
+			return uploadFile(client, filePath, parentUUID)
 		})
 		if err != nil {
 			log("warning: %v", err)
@@ -338,7 +352,7 @@ func cleanupHandler(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cleanup failed: %w", err)
 	}
 
-	// Restart xochitl if needed
+	// restarts xochitl if needed
 	if restartXochitl {
 		log("Restarting xochitl...")
 		if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
@@ -369,7 +383,7 @@ func removeHandler(cmd *cobra.Command, args []string) error {
 	}
 	defer client.Close()
 
-	// Check if file exists first
+	// checks if file exists first
 	exists, err := client.FileExists(fileName)
 	if err != nil {
 		return fmt.Errorf("failed to check if file exists: %w", err)
@@ -380,7 +394,7 @@ func removeHandler(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Stop xochitl before removal
+	// stops xochitl before removal
 	if restartXochitl {
 		log("Stopping xochitl...")
 		if _, err := client.RunCommand("systemctl stop xochitl"); err != nil {
@@ -393,7 +407,7 @@ func removeHandler(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to remove file: %w", err)
 	}
 
-	// Restart xochitl
+	// restarts xochitl
 	if restartXochitl {
 		log("Restarting xochitl...")
 		if _, err := client.RunCommand("systemctl restart xochitl"); err != nil {
@@ -411,9 +425,12 @@ func isSupported(path string) bool {
 	return ext == ".pdf" || ext == ".epub"
 }
 
-func uploadFile(client *remarkable.Client, path string) error {
+func uploadFile(client *remarkable.Client, path string, parentUUID string) error {
 	log("Uploading: %s", path)
 	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	if parentUUID != "" {
+		return client.UploadFile(path, name, forceOverwrite, parentUUID)
+	}
 	return client.UploadFile(path, name, forceOverwrite)
 }
 

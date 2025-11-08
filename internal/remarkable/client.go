@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -115,7 +116,7 @@ func (c *Client) RunCommand(cmd string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("command failed: %w", err)
 			}
-			return string(output), nil
+			return filterSSHWarnings(string(output)), nil
 		}
 	}
 
@@ -126,7 +127,22 @@ func (c *Client) RunCommand(cmd string) (string, error) {
 		return "", fmt.Errorf("command failed: %w", err)
 	}
 
-	return string(output), nil
+	return filterSSHWarnings(string(output)), nil
+}
+
+// filterSSHWarnings removes SSH warning messages from output
+func filterSSHWarnings(output string) string {
+	lines := strings.Split(output, "\n")
+	var filtered []string
+	for _, line := range lines {
+		// Skip lines that are SSH warnings
+		if !strings.HasPrefix(line, "** WARNING:") &&
+			!strings.HasPrefix(line, "** This session") &&
+			!strings.HasPrefix(line, "** The server") {
+			filtered = append(filtered, line)
+		}
+	}
+	return strings.Join(filtered, "\n")
 }
 
 func (c *Client) TransferFile(localPath, remotePath string) error {

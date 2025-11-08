@@ -117,12 +117,12 @@ func (c *Converter) processConfig(pdf *gofpdf.Fpdf, content []byte) error {
 
 // pdfRenderer renders goldmark AST to gofpdf
 type pdfRenderer struct {
-	pdf          *gofpdf.Fpdf
-	options      PDFOptions
-	source       []byte
-	listDepth    int
-	fontStack    []string // track font style (B, I, BI, "")
-	baseLeftMargin float64   // original left margin
+	pdf            *gofpdf.Fpdf
+	options        PDFOptions
+	source         []byte
+	listDepth      int
+	fontStack      []string // track font style (B, I, BI, "")
+	baseLeftMargin float64  // original left margin
 }
 
 func (r *pdfRenderer) pushFont(style string) {
@@ -157,12 +157,12 @@ func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
 
 	case *ast.Heading:
 		if entering {
-			r.pdf.Ln(6)  // Space before heading
+			r.pdf.Ln(6) // Space before heading
 			size := r.options.FontSize + float64(6-n.Level)*2
 			r.pdf.SetFont(r.options.MainFont, "B", size)
 		} else {
 			r.pdf.SetFont(r.options.MainFont, "", r.options.FontSize)
-			r.pdf.Ln(5)  // Space after heading
+			r.pdf.Ln(5) // Space after heading
 		}
 
 	case *ast.Paragraph:
@@ -191,15 +191,15 @@ func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
 
 	case *ast.ListItem:
 		if entering {
-			// Move to start of line with proper indent
+			// moves to start of line with proper indent
 			lMargin, _, _, _ := r.pdf.GetMargins()
 			r.pdf.SetX(lMargin)
 
-			// Write bullet/number - use simple ASCII bullet for compatibility
+			// writes bullet/number / use simple ASCII bullet for compatibility
 			if n.Parent().(*ast.List).IsOrdered() {
 				r.pdf.Cell(5, 5, "1.")
 			} else {
-				r.pdf.Cell(5, 5, "*")  // Use asterisk instead of Unicode bullet
+				r.pdf.Cell(5, 5, "*") // Use asterisk instead of Unicode bullet
 			}
 			r.pdf.Write(5, " ")
 		} else {
@@ -208,7 +208,6 @@ func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
 
 	case *ast.Emphasis:
 		if entering {
-			// Level 1 = italic (*text*), Level 2 = bold (**text**)
 			if n.Level == 2 {
 				r.pushFont("B")
 			} else {
@@ -263,7 +262,7 @@ func (r *pdfRenderer) render(node ast.Node, entering bool) ast.WalkStatus {
 		if entering {
 			txt := string(n.Segment.Value(r.source))
 
-			// Handle soft line breaks
+			// handles soft line breaks
 			if n.SoftLineBreak() {
 				txt += " "
 			}
@@ -288,7 +287,7 @@ func (c *Converter) processMarkdown(pdf *gofpdf.Fpdf, content []byte) error {
 	reader := text.NewReader(content)
 	doc := md.Parser().Parse(reader)
 
-	// Get initial left margin
+	// gets initial left margin
 	lMargin, _, _, _ := pdf.GetMargins()
 
 	renderer := &pdfRenderer{
@@ -317,8 +316,7 @@ func (c *Converter) MarkdownToPDF(mdPath string) (string, error) {
 
 	pdf := c.setupPDF()
 
-	// Don't add title separately - it's in the markdown as H1
-	// Just process the content
+	// don't add title separately / it's in the markdown as H1
 
 	// process content based on file type
 	ext := strings.ToLower(filepath.Ext(mdPath))
