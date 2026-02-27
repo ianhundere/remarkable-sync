@@ -45,7 +45,7 @@ if ! mountpoint -q /mnt/sound; then
 fi
 
 log "Starting rsync..."
-rsync -r --bwlimit=10000 --exclude='.Trash-1000' --exclude='._*' "$SRC" "$DST" >> "$LOGFILE" 2>&1
+rsync -r --bwlimit=10000 --exclude='.Trash-1000' --exclude='._*' "$SRC" "$DST" > /dev/null 2>&1
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
