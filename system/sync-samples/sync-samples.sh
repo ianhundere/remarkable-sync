@@ -45,13 +45,26 @@ if ! mountpoint -q /mnt/sound; then
 fi
 
 log "Starting rsync..."
-rsync -r --bwlimit=10000 --exclude='.Trash-1000' --exclude='._*' "$SRC" "$DST" > /dev/null 2>&1
-EXIT_CODE=$?
+FAILED=0
 
-if [ $EXIT_CODE -eq 0 ]; then
+# Sync top-level items individually to keep memory low
+for item in "$SRC"*; do
+    basename="$(basename "$item")"
+    # Skip trash and macOS dot files
+    [[ "$basename" == .Trash-1000 ]] && continue
+    [[ "$basename" == .* ]] && continue
+
+    rsync -r --bwlimit=10000 --exclude='.Trash-1000' --exclude='._*' "$item" "$DST" > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        log "ERROR: failed to sync $basename"
+        FAILED=1
+    fi
+done
+
+if [ $FAILED -eq 0 ]; then
     log "Sync completed successfully"
 else
-    log "Sync failed with exit code $EXIT_CODE"
+    log "Sync completed with errors"
 fi
 
-exit $EXIT_CODE
+exit $FAILED
