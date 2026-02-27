@@ -1,0 +1,2 @@
+# Trigger sample sync when Samsung T7 is plugged in
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_SERIAL_SHORT}=="S5TMNS0R607756B", ENV{ID_FS_UUID}=="685E-32F9", TAG+="systemd", RUN+="/usr/bin/systemctl start sync-samples.service"
