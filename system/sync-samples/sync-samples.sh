@@ -12,14 +12,18 @@ log() {
 
 log "Sync triggered — drive plugged in"
 
-# Wait for the drive to mount (fstab handles it, but give it a moment)
-for i in $(seq 1 30); do
+# Wait for the drive to mount (fstab handles it, but give it time)
+for i in $(seq 1 60); do
     mountpoint -q "$SRC" && break
+    # Try explicit mount after 10s in case fstab automount is slow
+    if [ "$i" -eq 10 ]; then
+        mount "$SRC" 2>/dev/null
+    fi
     sleep 1
 done
 
 if ! mountpoint -q "$SRC"; then
-    log "ERROR: $SRC not mounted after 30s, aborting"
+    log "ERROR: $SRC not mounted after 60s, aborting"
     exit 1
 fi
 
